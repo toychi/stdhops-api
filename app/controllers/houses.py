@@ -6,7 +6,7 @@ from app import app, mongo
 
 @app.route('/house')
 def house():
-    data = mongo.db.houses.find_one()
+    data = mongo.db.house.find_one()
     resp = make_response(jsonify(data), 200)
     resp.headers['Access-Control-Allow-Origin'] = '*'
     return resp

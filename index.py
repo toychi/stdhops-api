@@ -74,8 +74,5 @@ def index():
     resp.headers['Access-Control-Allow-Origin'] = '*'
     return resp
 
-    """ static files serve """
-    return send_from_directory('dist', 'index.html')
-
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(PORT)) # Run the app
