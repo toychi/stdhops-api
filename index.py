@@ -21,7 +21,7 @@ def not_found(error):
 @app.route('/')
 def index():
     data = [
-            ['ds', 1],
+            ['s', 1000],
             ['nc', 2],
             ['br', 3],
             ['bk', 4],
@@ -75,4 +75,4 @@ def index():
     return resp
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(PORT)) # Run the app
+    app.run(debug = True, host='0.0.0.0', port=int(PORT)) # Run the app
