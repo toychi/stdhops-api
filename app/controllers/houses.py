@@ -1,17 +1,137 @@
 ''' controller and routes for houses '''
 import os
 from flask import request, jsonify, make_response
-from app import app, mongo
+from app import app, mongo, flask_bcrypt, jwt
 import pandas as pd
 from pandas.io.json import json_normalize
 import re
 from sklearn import cluster
+import statistics
+import numpy as np
 import geopandas as gpd
+import joblib
+from datetime import datetime, timezone
+from app.controllers import crossdomain
+from app.schemas import validate_user
+from flask_jwt_extended import (create_access_token, create_refresh_token,
+                                jwt_required, jwt_refresh_token_required, get_jwt_identity)
+
 
 bkk_link = 'app/controllers/bkk_geo.json'
+model_name = 'app/controllers/cluster_model.bin'
+filenames = os.listdir('app/controllers/')
+
+district_name = [
+    "pn",
+    "ds",
+    "nc",
+    "br",
+    "bk",
+    "bkp",
+    "ptw",
+    "ppstp",
+    "pkn",
+    "mbr",
+    "lkb",
+    "ynw",
+    "sptw",
+    "pyt",
+    "tbr",
+    "bky",
+    "hk",
+    "ks",
+    "tlc",
+    "bkn",
+    "bkt",
+    "pscr",
+    "nk",
+    "rbrn",
+    "bp",
+    "dd",
+    "bku",
+    "st",
+    "bs",
+    "ctc",
+    "bkl",
+    "pw",
+    "kt",
+    "sl",
+    "ct",
+    "dm",
+    "rctw",
+    "lp",
+    "wtn",
+    "bkh",
+    "ls",
+    "sm",
+    "kny",
+    "sps",
+    "wtl",
+    "ksw",
+    "bn",
+    "twwtn",
+    "tk",
+    "bb"
+]
+
+
+@jwt.unauthorized_loader
+def unauthorized_response(callback):
+    return jsonify({
+        'ok': False,
+        'message': 'Missing Authorization Header'
+    }), 401
+
+
+@app.route('/register', methods=['POST'])
+def register():
+    ''' register user endpoint '''
+    data = validate_user(request.get_json())
+    if data['ok']:
+        data = data['data']
+        data['password'] = flask_bcrypt.generate_password_hash(
+            data['password'])
+        mongo.db.users.insert_one(data)
+        return jsonify({'ok': True, 'message': 'User created successfully!'}), 200
+    else:
+        return jsonify({'ok': False, 'message': 'Bad request parameters: {}'.format(data['message'])}), 400
+
+
+@app.route('/auth', methods=['OPTIONS', 'POST'])
+@crossdomain(origin='*')
+def auth_user():
+    ''' auth endpoint '''
+    data = validate_user(request.get_json())
+    if data['ok']:
+        data = data['data']
+        user = mongo.db.users.find_one({'email': data['email']}, {"_id": 0})
+        if user and flask_bcrypt.check_password_hash(user['password'], data['password']):
+            del user['password']
+            access_token = create_access_token(identity=data)
+            refresh_token = create_refresh_token(identity=data)
+            user['token'] = access_token
+            user['refresh'] = refresh_token
+            return jsonify({'ok': True, 'data': user}), 200
+        else:
+            return jsonify({'ok': False, 'message': 'invalid username or password'}), 401
+    else:
+        return jsonify({'ok': False, 'message': 'Bad request parameters: {}'.format(data['message'])}), 400
+
+
+@app.route('/refresh', methods=['POST'])
+@jwt_refresh_token_required
+def refresh():
+    ''' refresh token endpoint '''
+    current_user = get_jwt_identity()
+    ret = {
+            'token': create_access_token(identity=current_user)
+    }
+    return jsonify({'ok': True, 'data': ret}), 200
 
 
 @app.route('/house')
+@crossdomain(origin='*')
+@jwt_required
 def house():
     data = list(mongo.db['houseeeee'].aggregate(
         [{"$group": {"_id": "$district", "count": {"$sum": 1}}}]))
@@ -21,19 +141,126 @@ def house():
     return resp
 
 
-@app.route('/volume')
+@app.route('/volume', methods=['OPTIONS', 'POST'])
+@crossdomain(origin='*')
 def volume():
-    # data = list(mongo.db['houseeeee'].aggregate([{"$match" : {"price":{'$regex' : 'ขาย'}}}]))
-    sell_volume = mongo.db['houseeeee'].find(
-        {"price": {'$regex': 'ขาย'}}).count()
-    rent_volume = mongo.db['houseeeee'].find(
-        {"price": {'$regex': 'ให้เช่า'}}).count()
+    rent_result = {}
+    sale_result = {}
+    y = request.get_json()
+
+    for district in y['districts']:
+        if district == "All":
+            district = {"$regex":".+"}
+        query = {
+            "daypost": {"$gte": datetime(int(y['startyear']), 1, 1), "$lte": datetime(int(y['endyear']), 12, 31)},
+            "location": district
+        }
+        if type(district) == dict:
+            district = "All"
+        rent_result[district] = mongo.db['tgrent'].find(query).count()
+        sale_result[district] = mongo.db['tgsale'].find(query).count()
+
     resp = make_response(
-        jsonify({
-            'sell': sell_volume,
-            'rent': rent_volume
-        }), 200)
-    resp.headers['Access-Control-Allow-Origin'] = '*'
+        jsonify({"rent_result": rent_result, "sale_result": sale_result}), 200)
+    return resp
+
+
+@app.route('/price', methods=['OPTIONS', 'POST'])
+@crossdomain(origin='*')
+def price():
+    y = request.get_json()
+    pipeline = [
+        {
+            "$match": {
+                "daypost": {"$gte": datetime(int(y['startyear']), 1, 1), "$lte": datetime(int(y['endyear']), 12, 31)},
+                "ptype": y['ptype']
+            }
+        },
+        {
+            "$group": {
+                "_id": "$location",
+                'value': { "$avg": { "$toInt": { "$trim": { "input": "$price" } } } }
+            }
+        },
+        {
+            "$addFields": {
+                "name": "$_id",
+            }
+        }
+    ]
+    rent_result = list(mongo.db['tgrent'].aggregate(pipeline))
+    sale_result = list(mongo.db['tgsale'].aggregate(pipeline))
+
+    resp = make_response(
+        jsonify({"rent_result": rent_result, "sale_result": sale_result}), 200)
+    return resp
+
+
+@app.route('/ratio', methods=['OPTIONS', 'POST'])
+@crossdomain(origin='*')
+def ratio():
+    rent_result = {}
+    sale_result = {}
+    ptr_ratio = {}
+    y = request.get_json()
+
+    pipeline = [
+        {
+            "$match": {
+                "daypost": {"$gte": datetime(int(y['startyear']), 1, 1), "$lte": datetime(int(y['endyear']), 12, 31)},
+                "ptype": y['ptype']
+            }
+        },
+        {
+            "$group": {
+                "_id": "$location",
+                'value': { "$avg": { "$toInt": { "$trim": { "input": "$price" } } } }
+            }
+        },
+        {
+            "$addFields": {
+                "name": "$_id",
+            }
+        }
+    ]
+
+    for d in mongo.db['tgrent'].aggregate(pipeline):
+        rent_result[d["name"]] = d["value"]
+    for d in mongo.db['tgsale'].aggregate(pipeline):
+        sale_result[d["name"]] = d["value"]
+    
+    for district in y['districts']:
+        selling = sale_result.get(district, 0)
+        rental = rent_result.get(district, 1)
+        ptr_ratio[district] = round(selling / rental, 2)
+
+    # resp = make_response(
+    #     jsonify({"rent_result": rent_result, "sale_result": sale_result, "ratio": ratio}), 200)
+    resp = make_response(
+        jsonify(ptr_ratio), 200)
+    return resp
+
+
+@app.route('/saledistribution', methods=['POST', 'OPTIONS'])
+@crossdomain(origin='*')
+def saledistribution():
+    y = request.get_json()
+    pipeline = [
+        {
+            "$match": {
+                "district_code": y["districtcode"]
+            }
+        },
+        {
+            '$project': {
+                'priceint': 1,
+                'listed_date': 1
+            }
+        }
+    ]
+    result = list(mongo.db['thaihometown_sale'].aggregate(pipeline))
+
+    resp = make_response(jsonify(result), 200)
     return resp
 
 
@@ -65,7 +292,7 @@ def rent():
         # },
         {
             "$group": {
-                "_id": "$district", 
+                "_id": "$district",
                 "avg_rental": {"$avg": {"$toInt": "$priceint"}}
             }
         }
@@ -76,34 +303,86 @@ def rent():
 
 
 @app.route('/mapcluster')
+@crossdomain(origin='*')
 def mapcluster():
-    data = mongo.db.house.find()
-    k = json_normalize(list(data))
-    k[['bedroom', 'bathroom', 'parking']] = pd.DataFrame(
-        k.room.values.tolist())
-    k[['lat', 'lng']] = pd.DataFrame(k.latlng.values.tolist())
-    k['bedroom'] = k['bedroom'].str.replace('\D', '')
-    k['bathroom'] = k['bathroom'].str.replace('\D', '')
-    k['parking'] = k['parking'].str.replace('\D', '')
-    k['price'] = k['price'].str.replace('\D', '')
-    k.loc[k.area.str.contains('ตารางวา', na=False), 'area'] = pd.to_numeric(
-        k.loc[k.area.str.contains('ตารางวา', na=False)]['area'].str.replace('\D', '')) * 4
-    k.loc[k.area.str.contains('ตารางเมตร', na=False), 'area'] = pd.to_numeric(
-        k.loc[k.area.str.contains('ตารางเมตร', na=False)]['area'].str.replace('\D', ''))
-    k.loc[k.area.str.contains('ไร่', na=False), 'area'] = pd.to_numeric(
-        k.loc[k.area.str.contains('ไร่', na=False)]['area'].str.replace('\D', '')) * 1600
-    k = k.fillna(0)
-    km5 = cluster.KMeans(n_clusters=5)
-    k = k.drop(['_id', 'date', 'id', 'latlng', 'name', 'room'], axis=1)
-    for tag in ('price', 'area', 'bedroom', 'bathroom', 'parking'):
-        k[tag] = pd.to_numeric(k[tag])
-    g_k = k.groupby('district').mean()
-    bkk = gpd.read_file(bkk_link)
-    zdb = bkk.join(g_k, on='th-name').dropna()
-    km5cls = km5.fit(
-        zdb.drop(['name', 'th-name', 'code', 'hc-key', 'geometry'], axis=1).values)
+    if 'cluster_model.bin' in filenames:
+        km5cls = joblib.load(model_name)
+        status = 'cache'
+    else:
+        data = mongo.db.houseeeee.find()
+        k = json_normalize(list(data))
+        k[['bedroom', 'bathroom', 'parking']] = pd.DataFrame(
+            k.room.values.tolist())
+        k[['lat', 'lng']] = pd.DataFrame(k.latlng.values.tolist())
+        k['bedroom'] = k['bedroom'].str.replace('\D', '')
+        k['bathroom'] = k['bathroom'].str.replace('\D', '')
+        k['parking'] = k['parking'].str.replace('\D', '')
+        k['price'] = k['price'].str.replace('\D', '')
+        k.loc[k.area.str.contains('ตารางวา', na=False), 'area'] = pd.to_numeric(
+            k.loc[k.area.str.contains('ตารางวา', na=False)]['area'].str.replace('\D', '')) * 4
+        k.loc[k.area.str.contains('ตารางเมตร', na=False), 'area'] = pd.to_numeric(
+            k.loc[k.area.str.contains('ตารางเมตร', na=False)]['area'].str.replace('\D', ''))
+        k.loc[k.area.str.contains('ไร่', na=False), 'area'] = pd.to_numeric(
+            k.loc[k.area.str.contains('ไร่', na=False)]['area'].str.replace('\D', '')) * 1600
+        k = k.fillna(0)
+        km5 = cluster.KMeans(n_clusters=5)
+        k = k.drop(['_id', 'date', 'id', 'latlng', 'name', 'room'], axis=1)
+        for tag in ('price', 'area', 'bedroom', 'bathroom', 'parking'):
+            k[tag] = pd.to_numeric(k[tag])
+        g_k = k.groupby('district').mean()
+        bkk = gpd.read_file(bkk_link)
+        zdb = bkk.join(g_k, on='th-name').dropna()
+        km5cls = km5.fit(
+            zdb.drop(['name', 'th-name', 'code', 'hc-key', 'geometry'], axis=1).values)
+        joblib.dump(km5cls, model_name)
+        status = 'new'
     labels = list(map(int, km5cls.labels_))
     resp = make_response(
-        jsonify({'labels': labels, 'keys': list(zdb['hc-key'])}), 200)
-    resp.headers['Access-Control-Allow-Origin'] = '*'
+        jsonify({'labels': labels, 'keys': district_name, 'status': status, 'l': len(labels)}), 200)
     return resp
+
+
+@app.route('/stat', methods=['POST', 'OPTIONS'])
+@crossdomain(origin='*')
+def stat():
+    result = {}
+    y = request.get_json()
+    d = []
+    pipeline = [
+            {
+                "$group": {
+                    "_id": "$district_code",
+                    "price": { "$push": "$priceint"}
+                    # 'average': { "$avg": "$priceint" },
+                    # 'stdv': { "$stdDevPop": "$priceint" },
+                    # 'count': { "$sum": 1 }
+                }
+            }
+        ]
+    query = list(mongo.db['thaihometown_sale'].aggregate(pipeline))
+    for i in range(len(y['label'])):
+        d_list = []
+        for c in y['label'][i]['data']:
+            d_list.append(district_name.index(c['code']) + 1)
+        price_list = []
+        for j in query:
+            if j["_id"] in d_list:
+                price_list.extend(j["price"])
+        price_list = sorted(price_list)
+        outliner = []
+        q1, q3 = np.percentile(price_list,[25,75])
+        iqr = q3 - q1
+        lower_bound = q1 -(1.5 * iqr) 
+        upper_bound = q3 +(1.5 * iqr)
+        # for p in price_list:
+        #     if p > lower_bound or p < upper_bound:
+        #         outliner.append(p)
+        outliner.append(q1)
+        outliner.append(q3)
+        count = len(price_list)
+        mean = statistics.mean(price_list)
+        stdev = statistics.stdev(price_list)
+        result[y['label'][i]['name']] = { "mean": round(mean,2), "stdev": round(stdev,2), "count": count, "outliner": iqr, 'min': min(price_list), 'max': max(price_list)}
+    resp = make_response(jsonify(result), 200)
+    return resp
+

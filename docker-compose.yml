@@ -9,7 +9,8 @@ services:
   environment:
    - ENV=development
    - PORT=4000
-   - DB=mongodb://mongodb:27017/stdhops
+   - DB=mongodb://mongodb:27017/spatioreps
+   - SECRET=spatioreps
  mongodb:
   image: mongo:latest
   container_name: "mongodb"
@@ -20,7 +21,7 @@ services:
    - ./data/db:/data/db
    - ./data/dump:/data/dump
   ports:
-   - 27017:27017
+   - 27019:27017
   command: mongod --smallfiles --logpath=/dev/null # --quiet
 networks:
  default:

@@ -4968,7 +4968,7 @@
       "type": "Feature",
       "properties": {
         "name": "Rat Burana",
-        "th-name": "ราฎร์บูรณะ",
+        "th-name": "ราษฎร์บูรณะ",
         "code": "24",
         "hc-key": "rbrn"
       },
@@ -10392,7 +10392,7 @@
       "type": "Feature",
       "properties": {
         "name": "Thung Khru",
-        "th-name": "ทุ่มครุ",
+        "th-name": "ทุ่งครุ",
         "code": "49",
         "hc-key": "tk"
       },
