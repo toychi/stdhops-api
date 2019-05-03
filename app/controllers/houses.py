@@ -201,43 +201,53 @@ def price():
 def ratio():
     rent_result = {}
     sale_result = {}
-    ptr_ratio = {}
+    ptr_ratio = []
     y = request.get_json()
+    for d in y['districts']:
+        ptr_ratio.append({
+            "name": d,
+            "data": []
+        })
 
-    pipeline = [
-        {
-            "$match": {
-                "daypost": {"$gte": datetime(int(y['startyear']), 1, 1), "$lte": datetime(int(y['endyear']), 12, 31)},
-                "ptype": y['ptype']
+    for year in range(int(y["startyear"]), int(y["endyear"]) + 1):
+        pipeline = [
+            {
+                "$match": {
+                    "daypost": {"$gte": datetime(year, 1, 1), "$lte": datetime(year, 12, 31)},
+                    "ptype": y['ptype']
+                }
+            },
+            {
+                "$group": {
+                    "_id": "$location",
+                    'value': { "$avg": { "$toInt": { "$trim": { "input": "$price" } } } }
+                }
             }
-        },
-        {
-            "$group": {
-                "_id": "$location",
-                'value': { "$avg": { "$toInt": { "$trim": { "input": "$price" } } } }
-            }
-        },
-        {
-            "$addFields": {
-                "name": "$_id",
-            }
-        }
-    ]
+            # {
+            #     "$addFields": {
+            #         "x": year,
+            #         "y": "$value"
+            #     }
+            # }
+        ]
 
-    for d in mongo.db['tgrent'].aggregate(pipeline):
-        rent_result[d["name"]] = d["value"]
-    for d in mongo.db['tgsale'].aggregate(pipeline):
-        sale_result[d["name"]] = d["value"]
-    
-    for district in y['districts']:
-        selling = sale_result.get(district, 0)
-        rental = rent_result.get(district, 1)
-        ptr_ratio[district] = round(selling / rental, 2)
+        for d in mongo.db['tgrent'].aggregate(pipeline):
+            rent_result[d["_id"]] = d["value"]
+        for d in mongo.db['tgsale'].aggregate(pipeline):
+            sale_result[d["_id"]] = d["value"]
+
+        for i in range(len(ptr_ratio)):
+            district = ptr_ratio[i]['name']
+            selling = sale_result.get(district, 0)
+            rental = rent_result.get(district, 0) * 12
+            if selling != 0 and rental != 0:
+                ptr_ratio[i]['data'].append([year, round(selling / rental, 2)])
+            else:
+                ptr_ratio[i]['data'].append([year, 0])
 
     # resp = make_response(
     #     jsonify({"rent_result": rent_result, "sale_result": sale_result, "ratio": ratio}), 200)
-    resp = make_response(
-        jsonify(ptr_ratio), 200)
+    resp = make_response(jsonify(ptr_ratio), 200)
     return resp
 
 
@@ -351,7 +361,7 @@ def stat():
     pipeline = [
             {
                 "$group": {
-                    "_id": "$district_code",
+                    "_id": "$location",
                     "price": { "$push": "$priceint"}
                     # 'average': { "$avg": "$priceint" },
                     # 'stdv': { "$stdDevPop": "$priceint" },
@@ -359,7 +369,7 @@ def stat():
                 }
             }
         ]
-    query = list(mongo.db['thaihometown_sale'].aggregate(pipeline))
+    query = list(mongo.db['tgsale'].aggregate(pipeline))
     for i in range(len(y['label'])):
         d_list = []
         for c in y['label'][i]['data']:

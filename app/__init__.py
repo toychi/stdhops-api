@@ -21,11 +21,16 @@ class JSONEncoder(json.JSONEncoder):
 # create the flask object
 app = Flask(__name__)
 
-# add mongo url to flask config, so that flask_pymongo can use it to make connection
-app.config['MONGO_URI'] = os.environ.get('DB')
+# # add mongo url to flask config, so that flask_pymongo can use it to make connection
+# app.config['MONGO_URI'] = os.environ.get('DB')
+# mongo = PyMongo(app)
+
+# connect to multiple MongoDB databases
+mongo = PyMongo(app, uri=os.environ.get('DB'))
+mongo2 = PyMongo(app, uri="mongodb://mongodb:27017/stdhops")
+
 app.config['JWT_SECRET_KEY'] = os.environ.get('SECRET')
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = datetime.timedelta(days=1)
-mongo = PyMongo(app)
 flask_bcrypt = Bcrypt(app)
 jwt = JWTManager(app)
 
