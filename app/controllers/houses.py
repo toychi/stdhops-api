@@ -1,6 +1,6 @@
 ''' controller and routes for houses '''
 import os
-from flask import request, jsonify, make_response
+from flask import request, jsonify, make_response, flash, redirect, url_for
 from app import app, mongo, flask_bcrypt, jwt, mongo2
 import pandas as pd
 from pandas.io.json import json_normalize
@@ -11,6 +11,7 @@ import statistics
 import numpy as np
 import geopandas as gpd
 import joblib
+import csv
 from datetime import datetime, timezone
 import calendar
 from app.controllers import crossdomain
@@ -359,4 +360,30 @@ def location():
             "lon": c['location']['coordinates'][0]
         })
     resp = make_response(jsonify(result), 200)
+    return resp
+
+@app.route('/uploadfile', methods=['GET', 'POST', 'OPTIONS'])
+@crossdomain(origin='*')
+def uploadfile():
+    if request.method == 'POST':
+        print(request.files)
+        if 'file' in request.files:
+            mfile = request.files['file']
+            mfile.save(os.path.join('./data', mfile.filename))
+            with open(os.path.join('./data', mfile.filename)) as csv_file:
+                csv_reader = csv.reader(csv_file, delimiter=',')
+                line_count = 0
+                header = []
+                for row in csv_reader:
+                    if line_count == 0:
+                        header = row[:]
+                        line_count += 1
+                    else:
+                        dictionary = dict(zip(header, row))
+                        mongo.db['userupload'].insert_one(dictionary)
+                        line_count += 1
+                print(f'Processed {line_count} lines.')
+        else:
+            return make_response(jsonify({"Status":"Bad request"}), 400)
+    resp = make_response(jsonify({"Status":"Success"}), 200)
     return resp
