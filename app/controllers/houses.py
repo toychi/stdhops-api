@@ -19,11 +19,6 @@ from flask_jwt_extended import (create_access_token, create_refresh_token,
                                 jwt_required, jwt_refresh_token_required, get_jwt_identity)
 
 
-bkk_link = 'app/controllers/bkk_geo.json'
-model_name = 'app/controllers/cluster_model.bin'
-filenames = os.listdir('app/controllers/')
-
-
 @jwt.unauthorized_loader
 def unauthorized_response(callback):
     return jsonify({
@@ -365,91 +360,3 @@ def location():
         })
     resp = make_response(jsonify(result), 200)
     return resp
-
-
-@app.route('/mapcluster')
-@crossdomain(origin='*')
-def mapcluster():
-    if 'cluster_model.bin' in filenames:
-        km5cls = joblib.load(model_name)
-        status = 'cache'
-    else:
-        data = mongo.db.houseeeee.find()
-        k = json_normalize(list(data))
-        k[['bedroom', 'bathroom', 'parking']] = pd.DataFrame(
-            k.room.values.tolist())
-        k[['lat', 'lng']] = pd.DataFrame(k.latlng.values.tolist())
-        k['bedroom'] = k['bedroom'].str.replace('\D', '')
-        k['bathroom'] = k['bathroom'].str.replace('\D', '')
-        k['parking'] = k['parking'].str.replace('\D', '')
-        k['price'] = k['price'].str.replace('\D', '')
-        k.loc[k.area.str.contains('ตารางวา', na=False), 'area'] = pd.to_numeric(
-            k.loc[k.area.str.contains('ตารางวา', na=False)]['area'].str.replace('\D', '')) * 4
-        k.loc[k.area.str.contains('ตารางเมตร', na=False), 'area'] = pd.to_numeric(
-            k.loc[k.area.str.contains('ตารางเมตร', na=False)]['area'].str.replace('\D', ''))
-        k.loc[k.area.str.contains('ไร่', na=False), 'area'] = pd.to_numeric(
-            k.loc[k.area.str.contains('ไร่', na=False)]['area'].str.replace('\D', '')) * 1600
-        k = k.fillna(0)
-        km5 = cluster.KMeans(n_clusters=5)
-        k = k.drop(['_id', 'date', 'id', 'latlng', 'name', 'room'], axis=1)
-        for tag in ('price', 'area', 'bedroom', 'bathroom', 'parking'):
-            k[tag] = pd.to_numeric(k[tag])
-        g_k = k.groupby('district').mean()
-        bkk = gpd.read_file(bkk_link)
-        zdb = bkk.join(g_k, on='th-name').dropna()
-        km5cls = km5.fit(
-            zdb.drop(['name', 'th-name', 'code', 'hc-key', 'geometry'], axis=1).values)
-        joblib.dump(km5cls, model_name)
-        status = 'new'
-    labels = list(map(int, km5cls.labels_))
-    resp = make_response(
-        jsonify({'labels': labels, 'keys': district_name, 'status': status, 'l': len(labels)}), 200)
-    return resp
-
-
-@app.route('/stat', methods=['POST', 'OPTIONS'])
-@crossdomain(origin='*')
-def stat():
-    result = {}
-    ptype = 'condo_listing'
-    y = request.get_json()
-    d = []
-    pipeline = [
-            {
-                "$group": {
-                    "_id": "$location",
-                    "price": { "$push": "$price"}
-                    # 'average': { "$avg": "$priceint" },
-                    # 'stdv': { "$stdDevPop": "$priceint" },
-                    # 'count': { "$sum": 1 }
-                }
-            }
-        ]
-    query = list(mongo.db['tgsale'].aggregate(pipeline))
-    for i in range(len(y['label'])):
-        d_list = []
-        for c in y['label'][i]['data']:
-            d_list.append(district_name.index(c['code']) + 1)
-        price_list = []
-        for j in query:
-            if district_code[j["_id"]] in d_list:
-                price_list.extend(j["price"])
-        price_list = sorted(price_list)
-        price_list = list(map(int, price_list))
-        outliner = []
-        q1, q3 = np.percentile(price_list,[25,75])
-        iqr = q3 - q1
-        lower_bound = q1 -(1.5 * iqr) 
-        upper_bound = q3 +(1.5 * iqr)
-        # for p in price_list:
-        #     if p > lower_bound or p < upper_bound:
-        #         outliner.append(p)
-        outliner.append(q1)
-        outliner.append(q3)
-        count = len(price_list)
-        mean = statistics.mean(price_list)
-        stdev = statistics.stdev(price_list)
-        result[y['label'][i]['name']] = { "mean": round(mean,2), "stdev": round(stdev,2), "count": count, "outliner": iqr, 'min': min(price_list), 'max': max(price_list)}
-    resp = make_response(jsonify(result), 200)
-    return resp
-
