@@ -5,12 +5,14 @@ from app import app, mongo, flask_bcrypt, jwt, mongo2
 import pandas as pd
 from pandas.io.json import json_normalize
 import re
+from collections import defaultdict
 from sklearn import cluster
 import statistics
 import numpy as np
 import geopandas as gpd
 import joblib
 from datetime import datetime, timezone
+import calendar
 from app.controllers import crossdomain
 from app.schemas import validate_user
 from flask_jwt_extended import (create_access_token, create_refresh_token,
@@ -20,115 +22,6 @@ from flask_jwt_extended import (create_access_token, create_refresh_token,
 bkk_link = 'app/controllers/bkk_geo.json'
 model_name = 'app/controllers/cluster_model.bin'
 filenames = os.listdir('app/controllers/')
-
-district_name = [
-    "pn",
-    "ds",
-    "nc",
-    "br",
-    "bk",
-    "bkp",
-    "ptw",
-    "ppstp",
-    "pkn",
-    "mbr",
-    "lkb",
-    "ynw",
-    "sptw",
-    "pyt",
-    "tbr",
-    "bky",
-    "hk",
-    "ks",
-    "tlc",
-    "bkn",
-    "bkt",
-    "pscr",
-    "nk",
-    "rbrn",
-    "bp",
-    "dd",
-    "bku",
-    "st",
-    "bs",
-    "ctc",
-    "bkl",
-    "pw",
-    "kt",
-    "sl",
-    "ct",
-    "dm",
-    "rctw",
-    "lp",
-    "wtn",
-    "bkh",
-    "ls",
-    "sm",
-    "kny",
-    "sps",
-    "wtl",
-    "ksw",
-    "bn",
-    "twwtn",
-    "tk",
-    "bb"
-]
-
-district_code = {
-        "All": 0,
-        "Bang Bon": 50,
-        "Bang Kapi": 6,
-        "Bang Khae": 40,
-        "Bang Khen": 5,
-        "Bang Kho Laem": 31,
-        "Bang Khun Thian": 21,
-        "Bang Khun Thain": 21,
-        "Bang Na": 47,
-        "Bang Phlat": 25,
-        "Bang Rak": 4,
-        "Bang Sue": 29,
-        "Bangkok Noi": 20,
-        "Bangkok Yai": 16,
-        "Bueng Kum": 27,
-        "Chatuchak": 30,
-        "Chom Thong": 35,
-        "Din Daeng": 26,
-        "Don Mueang": 36,
-        "Dusit": 2,
-        "Huai Khwang": 17,
-        "Khan Na Yao": 43,
-        "Khlong Sam Wa": 46,
-        "Khlong San": 18,
-        "Khlong Toei": 33,
-        "Lak Si": 41,
-        "Lat Krabang": 11,
-        "Lat Phrao": 38,
-        "Min Buri": 10,
-        "Nong Chok": 3,
-        "Nong Khaem": 23,
-        "Pathum Wan": 7,
-        "Phasi Charoen": 22,
-        "Phaya Thai": 14,
-        "Phra Khanong": 9,
-        "Phra Nakhon": 1,
-        "Pom Prap Sattru Phai": 8,
-        "Prawet": 32,
-        "Rat Burana": 24,
-        "Ratchathewi": 37,
-        "Sai Mai": 42,
-        "Samphanthawong": 13,
-        "Saphan Sung": 44,
-        "Sathon": 28,
-        "Suan Luang": 34,
-        "Taling Chan": 19,
-        "Thawi Watthana": 48,
-        "Thon Buri": 15,
-        "Thung Khru": 49,
-        "Wang Thonglang": 45,
-        "Wang Thong Lang": 45,
-        "Watthana": 39,
-        "Yan Nawa": 12
-}
 
 
 @jwt.unauthorized_loader
@@ -185,39 +78,101 @@ def refresh():
     return jsonify({'ok': True, 'data': ret}), 200
 
 
-@app.route('/house')
-@crossdomain(origin='*')
-@jwt_required
-def house():
-    data = list(mongo.db['houseeeee'].aggregate(
-        [{"$group": {"_id": "$district", "count": {"$sum": 1}}}]))
-    # data = mongo.db.houseeeee.find_one()
-    resp = make_response(jsonify({'data': data}), 200)
-    resp.headers['Access-Control-Allow-Origin'] = '*'
-    return resp
-
-
 @app.route('/volume', methods=['OPTIONS', 'POST'])
 @crossdomain(origin='*')
 def volume():
-    rent_result = {}
-    sale_result = {}
+    rent_result = []
+    sale_result = []
+    rent_result_sum = []
+    sale_result_sum = []
     y = request.get_json()
+    ptype = 'condo_listing'
+    rent_volume = defaultdict(list)
+    sale_volume = defaultdict(list)
+    for year in range(y['startyear'], y['endyear'] + 1):
+        for month, day in zip([1, 4, 7, 10], [31, 30, 30, 31]):
+            pipeline = [
+                {
+                    "$project": {
+                        "name": 1,
+                        "location": 1,
+                        "sale": {
+                            "$filter": {
+                                "input": "$sale",
+                                "as": "item",
+                                "cond": { "$and": [
+                                    { "$gte": [ "$$item.daypost", datetime(year, month, 1) ] }, 
+                                    { "$lte": [ "$$item.daypost", datetime(year, month + 2, day) ] }
+                                ] }
+                            }
+                        },
+                        "rent": {
+                            "$filter": {
+                                "input": "$rent",
+                                "as": "item",
+                                "cond": { "$and": [
+                                    { "$gte": [ "$$item.daypost", datetime(year, month, 1) ] }, 
+                                    { "$lte": [ "$$item.daypost", datetime(year, month + 2, day) ] }
+                                ] }
+                            }
+                        }
+                    }
+                },
+                {
+                    "$project": {
+                        "countSale": { "$cond": { "if": { "$isArray": "$sale" }, "then": { "$size": "$sale" }, "else": 0} },
+                        "countRent": { "$cond": { "if": { "$isArray": "$rent" }, "then": { "$size": "$rent" }, "else": 0} },
+                        "name": 1,
+                        "location": 1
+                    }
+                },
+                {
+                    "$group": {
+                        "_id": "$location",
+                        "sumCountSale": { "$sum": "$countSale" },
+                        "sumCountRent": { "$sum": "$countRent" }
+                    }
+                }
+            ]
+            all_rent = 0
+            all_sale = 0
+            for d in mongo.db[ptype].aggregate(pipeline):
+                rent_volume[d["_id"]].append(["{} {}".format(calendar.month_abbr[month], year), d["sumCountRent"]])
+                sale_volume[d["_id"]].append(["{} {}".format(calendar.month_abbr[month], year), d["sumCountSale"]])
+                all_rent = all_rent + d["sumCountRent"]
+                all_sale = all_sale + d["sumCountSale"]
+            rent_volume["All"].append(["{} {}".format(calendar.month_abbr[month], year), all_rent])
+            sale_volume["All"].append(["{} {}".format(calendar.month_abbr[month], year), all_sale])
 
     for district in y['districts']:
-        if district == "All":
-            district = {"$regex":".+"}
-        query = {
-            "daypost": {"$gte": datetime(int(y['startyear']), 1, 1), "$lte": datetime(int(y['endyear']), 12, 31)},
-            "location": district
-        }
-        if type(district) == dict:
-            district = "All"
-        rent_result[district] = mongo.db['tgrent'].find(query).count()
-        sale_result[district] = mongo.db['tgsale'].find(query).count()
+        sale_result.append({
+            "id": district,
+            "name": district,
+            "data": sale_volume[district]
+        })
+        rent_result.append({
+            "id": district,
+            "name": district,
+            "data": rent_volume[district]
+        })
+        sale_result_sum.append({
+            "name": district,
+            "drilldown": district,
+            "y": sum([v for m, v in sale_volume[district]])
+        })
+        rent_result_sum.append({
+            "name": district,
+            "drilldown": district,
+            "y": sum([v for m, v in rent_volume[district]])
+        })
 
     resp = make_response(
-        jsonify({"rent_result": rent_result, "sale_result": sale_result}), 200)
+        jsonify({
+            "rent_result": rent_result, 
+            "sale_result": sale_result,
+            "rent_result_sum": rent_result_sum,
+            "sale_result_sum": sale_result_sum
+            }), 200)
     return resp
 
 
@@ -225,17 +180,18 @@ def volume():
 @crossdomain(origin='*')
 def price():
     y = request.get_json()
-    pipeline = [
-        {
+    ptype = 'condo_listing'
+    sale_pipeline = [
+        { "$unwind": "$sale" },
+        { 
             "$match": {
-                "daypost": {"$gte": datetime(int(y['startyear']), 1, 1), "$lte": datetime(int(y['endyear']), 12, 31)},
-                "ptype": y['ptype']
+                "sale.daypost": { "$gte": datetime(int(y['startyear']), 1, 1), "$lte": datetime(int(y['startyear']), 12, 31) }
             }
         },
         {
             "$group": {
                 "_id": "$location",
-                'value': { "$avg": { "$toInt": { "$trim": { "input": "$price" } } } }
+                'value': { "$avg": "$sale.price" }
             }
         },
         {
@@ -244,8 +200,28 @@ def price():
             }
         }
     ]
-    rent_result = list(mongo.db['tgrent'].aggregate(pipeline))
-    sale_result = list(mongo.db['tgsale'].aggregate(pipeline))
+
+    rent_pipeline = [
+        { "$unwind": "$rent" },
+        { 
+            "$match": {
+                "rent.daypost": { "$gte": datetime(int(y['startyear']), 1, 1), "$lte": datetime(int(y['startyear']), 12, 31) }
+            }
+        },
+        {
+            "$group": {
+                "_id": "$location",
+                'value': { "$avg": "$rent.price" }
+            }
+        },
+        {
+            "$addFields": {
+                "name": "$_id",
+            }
+        }
+    ]
+    rent_result = list(mongo.db[ptype].aggregate(rent_pipeline))
+    sale_result = list(mongo.db[ptype].aggregate(sale_pipeline))
 
     resp = make_response(
         jsonify({"rent_result": rent_result, "sale_result": sale_result}), 200)
@@ -259,6 +235,7 @@ def ratio():
     sale_result = {}
     ptr_ratio = []
     y = request.get_json()
+    ptype = 'condo_listing'
     for d in y['districts']:
         ptr_ratio.append({
             "name": d,
@@ -267,42 +244,69 @@ def ratio():
 
     for year in range(int(y["startyear"]), int(y["endyear"]) + 1):
         pipeline = [
-            {
-                "$match": {
-                    "daypost": {"$gte": datetime(year, 1, 1), "$lte": datetime(year, 12, 31)},
-                    "ptype": y['ptype']
-                }
-            },
-            {
-                "$group": {
-                    "_id": "$location",
-                    'value': { "$avg": { "$toInt": { "$trim": { "input": "$price" } } } }
+        {
+            "$project": {
+                "name": 1,
+                "location": 1,
+                "sale": {
+                    "$filter": {
+                        "input": "$sale",
+                        "as": "item",
+                        "cond": { "$and": [
+                            { "$gte": [ "$$item.daypost", datetime(year, 1, 1) ] }, 
+                            { "$lte": [ "$$item.daypost", datetime(year, 12, 31) ] }
+                        ] }
+                    }
+                },
+                "rent": {
+                    "$filter": {
+                        "input": "$rent",
+                        "as": "item",
+                        "cond": { "$and": [
+                            { "$gte": [ "$$item.daypost", datetime(year, 1, 1) ] }, 
+                            { "$lte": [ "$$item.daypost", datetime(year, 12, 31) ] }
+                        ] }
+                    }
                 }
             }
-            # {
-            #     "$addFields": {
-            #         "x": year,
-            #         "y": "$value"
-            #     }
-            # }
-        ]
+        },
+        {
+            "$project": {
+                "meanSale": { "$avg": "$sale.price" },
+                "meanRent": { "$avg": "$rent.price" },
+                "name": 1,
+                "location": 1,
+                "sale": "$sale",
+                "rent": "$rent"
+            }
+        },
+        {
+            "$addFields": {
+                "ptr": { 
+                    "$divide": ["$meanSale", { "$multiply": ["$meanRent", 12] }]
+                }
+            }
+        },
+        {
+            "$group": {
+                "_id": "$location",
+                "meanPtr": { "$avg": "$ptr" }
+            }
+        }]
 
-        for d in mongo.db['tgrent'].aggregate(pipeline):
-            rent_result[d["_id"]] = d["value"]
-        for d in mongo.db['tgsale'].aggregate(pipeline):
-            sale_result[d["_id"]] = d["value"]
+        ptr_result = {}
+        for d in mongo.db[ptype].aggregate(pipeline):
+            ptr_result[d["_id"]] = d["meanPtr"]
+        try:
+            ptr_result["All"] = statistics.mean([v for v in ptr_result.values() if v is not None])
+        except statistics.StatisticsError:
+            ptr_result["All"] = None
 
         for i in range(len(ptr_ratio)):
             district = ptr_ratio[i]['name']
-            selling = sale_result.get(district, 0)
-            rental = rent_result.get(district, 0) * 12
-            if selling != 0 and rental != 0:
-                ptr_ratio[i]['data'].append([year, round(selling / rental, 2)])
-            else:
-                ptr_ratio[i]['data'].append([year, 0])
+            ptr = ptr_result.get(district, None)
+            ptr_ratio[i]['data'].append([year, ptr])
 
-    # resp = make_response(
-    #     jsonify({"rent_result": rent_result, "sale_result": sale_result, "ratio": ratio}), 200)
     resp = make_response(jsonify(ptr_ratio), 200)
     return resp
 
@@ -311,60 +315,55 @@ def ratio():
 @crossdomain(origin='*')
 def saledistribution():
     y = request.get_json()
-    pipeline = [
+    ptype = 'condo_listing'
+    sale_pipeline = [
+        { "$unwind": "$sale" },
         {
             "$match": {
-                "district_code": y["districtcode"]
+                "location": y['district']
             }
         },
         {
-            '$project': {
-                'priceint': 1,
-                'listed_date': 1
+            "$project": {
+                "_id": 0,
+                "sale.price": 1
             }
         }
     ]
-    result = list(mongo2.db['thaihometown_sale'].aggregate(pipeline))
+    rent_pipeline = [
+        { "$unwind": "$rent" },
+        {
+            "$match": {
+                "location": y['district']
+            }
+        },
+        {
+            "$project": {
+                "_id": 0,
+                "rent.price": 1
+            }
+        }
+    ]
+    rent_result = [doc['rent']['price'] for doc in mongo.db[ptype].aggregate(rent_pipeline)]
+    sale_result = [doc['sale']['price'] for doc in mongo.db[ptype].aggregate(sale_pipeline)]
 
-    resp = make_response(jsonify(result), 200)
+    resp = make_response(
+        jsonify({"rent_result": rent_result, "sale_result": sale_result}), 200)
     return resp
 
 
-@app.route('/rent')
-def rent():
-    data = list(mongo.db['rental_price'].aggregate([
-        # {
-        #     "$match": {2
-        #         "price": {"$regex": "ให้เช่า"}
-        #     }
-        # },
-        # {
-        #     "$project": {
-        #         "_id": 0,
-        #         "id": 1,
-        #         "district": 1,
-        #         "priceint": {
-        #             "$reduce": {
-        #                 "input": {'$split': [{'$trim': {'input': "$price", 'chars': "ให้เช่า บาท/เดือน"}}, ',']},
-        #                 'initialValue': '',
-        #                 'in': {
-        #                     '$concat': [
-        #                         '$$value',
-        #                         '$$this']
-        #                 }
-        #             }
-        #         }
-        #     }
-        # },
-        {
-            "$group": {
-                "_id": "$district",
-                "avg_rental": {"$avg": {"$toInt": "$priceint"}}
-            }
-        }
-    ]))
-    resp = make_response(jsonify(data), 200)
-    resp.headers['Access-Control-Allow-Origin'] = '*'
+@app.route('/location', methods=['POST', 'OPTIONS'])
+@crossdomain(origin='*')
+def location():
+    y = request.get_json()
+    result = []
+    for c in mongo.db['condo'].find({"district": y['district']}):
+        result.append({
+            "name": c['name'],
+            "lat": c['location']['coordinates'][1],
+            "lon": c['location']['coordinates'][0]
+        })
+    resp = make_response(jsonify(result), 200)
     return resp
 
 
@@ -412,6 +411,7 @@ def mapcluster():
 @crossdomain(origin='*')
 def stat():
     result = {}
+    ptype = 'condo_listing'
     y = request.get_json()
     d = []
     pipeline = [
