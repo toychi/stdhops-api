@@ -9,7 +9,7 @@ services:
   environment:
    - ENV=development
    - PORT=4000
-   - DB=mongodb://mongodb:27017/spatioreps
+   - DB=mongodb://mongodb:27017/spatioreps2
    - SECRET=spatioreps
  mongodb:
   image: mongo:latest

@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 import calendar
 from app.controllers import crossdomain
 from app.schemas import validate_user
+from statistics import StatisticsError
+from sklearn import preprocessing
 from flask_jwt_extended import (create_access_token, create_refresh_token,
                                 jwt_required, jwt_refresh_token_required, get_jwt_identity)
 
@@ -183,48 +185,150 @@ DISTRICTS = [
 "Thung Khru",
 "Bang Bon"
 ]
+def remove_outlier_price(list_price_size_tuple, sep=1.5):
+    if len(list_price_size_tuple) < 2:
+        return list_price_size_tuple
+    
+    prices = [x[0] for x in list_price_size_tuple]
+    median = statistics.median(prices)
+    std = statistics.stdev(prices)
+    
+    list_price_size_tuple_cleaned = [x for x in list_price_size_tuple if x[0] <= median + sep * median]
+    
+    return list_price_size_tuple_cleaned
 
-@app.route('/mapcluster')
+def remove_outlier_size(list_price_size_tuple, sep=1.5 ):
+    if len(list_price_size_tuple) < 2:
+        return list_price_size_tuple
+    
+    sizes = [x[1] for x in list_price_size_tuple]
+    median = statistics.median(sizes)
+    
+    list_price_size_tuple_cleaned = [x for x in list_price_size_tuple if x[1] <= median + sep * median]
+    
+    return list_price_size_tuple_cleaned
+
+def validMean(list_of_tuple, attr):
+    try:
+        if attr == "price":
+            return statistics.mean([ x[0] for x in remove_outlier_price(list_of_tuple)])
+        else:
+            return statistics.mean([ x[0] for x in remove_outlier_size(list_of_tuple)])
+    except StatisticsError:
+        return None
+
+def get_Mean(name):
+    condos_id = [i['_id'] for i in mongo.db['condo'].find({"district": name}, {"_id":1})]
+    listing = [ doc for doc in list(mongo.db['condo_listing'].find({}, {"sale":1, "rent": 1, "property": 1})) if doc['property'] in condos_id]
+    sum_size = []
+    sum_sale_price = []
+    sum_rent_price = []
+
+    for room_type in listing:
+        if "sale" in room_type.keys():
+            list_price_size_tuple = []
+            for obj in room_type['sale']:
+                price = obj['price']
+                size = obj['size']
+                if price == None or size == None or isinstance(size,str) or isinstance(price,str):
+                    continue
+                price_size_tuple = (price,size)
+                list_price_size_tuple.append(price_size_tuple)
+            
+            list_price_size_tuple_cleaned = remove_outlier_price(list_price_size_tuple, sep=0.75)
+            sum_sale_price.extend(list_price_size_tuple_cleaned)
+            sum_size.extend(remove_outlier_size(list_price_size_tuple, sep=0.75))
+
+        if "rent" in room_type.keys():
+            list_rent_size_tuple = []
+            for obj in room_type['rent']:
+                price = obj['price'] 
+                size = obj['size']
+                if price == None or size == None or isinstance(size,str) or isinstance(price,str):
+                    continue
+                price_size_tuple = (price, size)
+                list_rent_size_tuple.append(price_size_tuple)
+            
+            list_rent_size_tuple_cleaned = remove_outlier_price(list_rent_size_tuple, sep=0.75)
+            sum_rent_price.extend(list_rent_size_tuple_cleaned)
+            sum_size.extend(remove_outlier_size(list_rent_size_tuple, sep=0.75))
+
+    mean_sale = validMean(sum_sale_price, "price")
+    mean_rent = validMean(sum_rent_price, "price")
+    mean_size = validMean(sum_size, "size")
+
+    return [mean_sale, mean_rent, mean_size]
+
+
+@app.route('/mapcluster', methods=['POST', 'OPTIONS'])
 @crossdomain(origin='*')
 def mapcluster():
-    if 'cluster_model.bin' in filenames:
+    y = request.get_json()
+    no_cluster = y['num']
+    if 'cluster_model5.bin' in filenames:
         kmcls = joblib.load(model_name)
         status = 'cache'
     else:
         collection_name = 'condo_listing'
+        features = {}
         df = json_normalize(list(mongo.db[collection_name].find({})))
-        sale_total = []
-        rent_total = []
-        size_total = []
-        for ps, pr, ss in zip(df.sale.values, df.rent.values, df['size'].values):
-            if type(ps) is not list:
-                sale_total.append(0)
-            else:
-                sale_total.append(statistics.mean([v['price'] for v in ps]))
-            if type(pr) is not list:
-                rent_total.append(0)
-            else:
-                rent_total.append(statistics.mean([v['price'] for v in pr]))
-
-            temp = [i for i in ss if type(i) is not str]
-            if len(temp) < 1:
-                size_total.append(0)
-            else:
-                size_total.append(statistics.mean(temp))
-        df[['meanSale', 'meanRent', 'meanSize']] = pd.DataFrame(list(zip(sale_total, rent_total, size_total)))
+        for d in mongo.db['condo'].distinct("district"):
+            features[d] = get_Mean(d)
+            features[d].append(statistics.mean([doc['bts']['distance'] for doc in mongo.db['condo'].find({"district": d})]))
+            features[d].append(statistics.mean([doc['store']['distance'] for doc in mongo.db['condo'].find({"district": d})]))
+        df = pd.DataFrame.from_dict(features, orient='index', columns=['sale', 'rent', 'size', 'bts', 'store'])
+        mydf = df.dropna()[:-2].drop("Khlong Sam Wa")
+        X_scaled = preprocessing.scale(mydf.values)
+        km = cluster.KMeans(n_clusters=no_cluster)
+        kmcls = km.fit(X_scaled)
+        mydf['labels'] = kmcls.labels_
         bkk = gpd.read_file(bkk_link)
-        mydf = df.drop(['_id', 'name', 'rent', 'sale', 'size'], axis=1)
-        g_k = mydf.groupby('location').mean()
-        zdb = bkk.join(g_k, on='name')
-        km = cluster.KMeans(n_clusters=5)
-        kmcls = km.fit(zdb.fillna(0).drop(['name','th-name','code','hc-key','geometry'], axis=1).values)
-        joblib.dump(kmcls, model_name)
+        zdb = bkk.join(mydf, on='name').dropna()
+        # joblib.dump(kmcls, model_name)
         status = 'new'
-    labels = list(map(int, kmcls.labels_))
+    labels = list(map(int, zdb['labels']))
+    keys = zdb['labels'].keys()
+    result = [(l, k) for l, k in zip(labels, keys)]
+    stat = mydf.groupby('labels').mean().to_dict()
     resp = make_response(
-        jsonify({'labels': labels, 'keys': DISTRICTS_NAME, 'status': status, 'l': len(labels)}), 200)
+        jsonify({'labels': result, 'keys': DISTRICTS_NAME, 'status': status, 'l': len(result), 'stat': stat}), 200)
     return resp
 
+@app.route('/mapcluster2', methods=['POST', 'OPTIONS'])
+@crossdomain(origin='*')
+def mapcluster2():
+    y = request.get_json()
+    no_cluster = y['num']
+    if 'cluster_model5.bin' in filenames:
+        kmcls = joblib.load(model_name)
+        status = 'cache'
+    else:
+        kf = pd.read_csv(datafile)
+        collection_name = 'condo_listing'
+        features = {}
+        df = json_normalize(list(mongo.db[collection_name].find({})))
+        for d in mongo.db['condo'].distinct("district"):
+            features[d] = get_Mean(d)
+            features[d].append(statistics.mean([doc['bts']['distance'] for doc in mongo.db['condo'].find({"district": d})]))
+            features[d].append(statistics.mean([doc['store']['distance'] for doc in mongo.db['condo'].find({"district": d})]))
+        df = pd.DataFrame.from_dict(features, orient='index', columns=['sale', 'rent', 'size', 'bts', 'store'])
+        mydf = df.dropna()[:-2].drop("Khlong Sam Wa")
+        bkk = gpd.read_file(bkk_link)
+        zdb = bkk.join(mydf, on='name').dropna()
+        zdb = zdb.merge(kf, left_on='th-name', right_on='district', how='left').drop(['name','th-name','code','hc-key','geometry','district'], axis=1)
+        X_scaled = preprocessing.scale(zdb.values)
+        km = cluster.KMeans(n_clusters=no_cluster)
+        kmcls = km.fit(X_scaled)
+        zdb['labels'] = kmcls.labels_
+        # joblib.dump(kmcls, model_name)
+        status = 'new'
+    labels = list(map(int, zdb['labels']))
+    keys = zdb['labels'].keys()
+    result = [(l, k) for l, k in zip(labels, keys)]
+    stat = zdb.groupby('labels').mean().to_dict()
+    resp = make_response(
+        jsonify({'labels': result, 'keys': DISTRICTS_NAME, 'status': status, 'l': len(result), 'stat': stat}), 200)
+    return resp
 
 @app.route('/kmean', methods=['POST', 'OPTIONS'])
 @crossdomain(origin='*')
@@ -280,54 +384,66 @@ def stat():
     ptype = 'condo_listing'
     y = request.get_json()
     d = []
-    pipeline = [
-        {
-            "$project": {
-                "meanSale": { "$avg": "$sale.price" },
-                "meanRent": { "$avg": "$rent.price" },
-                "name": 1,
-                "location": 1,
-            }
-        },
-        {
-            "$group": {
-                "_id": "$location",
-                "sale": {"$avg": "$meanSale"},
-                "rent": {"$avg": "$meanRent"}
-            }
-        }
-    ]
-    query = list(mongo.db[ptype].aggregate(pipeline))
-    for i in range(len(y['label'])):
-        d_list = []
-        for c in y['label'][i]['data']:
-            d_list.append(DISTRICTS_NAME.index(c['code']))
-        saleprice_list = []
-        rentprice_list = []
-        for j in query:
-            if DISTRICTS.index(j["_id"])in d_list:
-                if j["sale"] is not None:
-                    saleprice_list.append(j["sale"])
-                if j["rent"] is not None:
-                    rentprice_list.append(j["rent"])
-        saleprice_list = sorted(saleprice_list)
-        rentprice_list = sorted(rentprice_list)
-        saleprice_list = list(map(int, saleprice_list))
-        rentprice_list = list(map(int, rentprice_list))
-        # outliner = []
-        # q1, q3 = np.percentile(price_list, [25, 75])
-        # iqr = q3 - q1
-        # lower_bound = q1 - (1.5 * iqr)
-        # upper_bound = q3 + (1.5 * iqr)
-        # # for p in price_list:
-        # #     if p > lower_bound or p < upper_bound:
-        # #         outliner.append(p)
-        # outliner.append(q1)
-        # outliner.append(q3)
-        count = len(saleprice_list)
-        mean1 = statistics.mean(saleprice_list) if len(saleprice_list) > 0 else 0
-        mean2 = statistics.mean(rentprice_list) if len(rentprice_list) > 0 else 0
-        result[y['label'][i]['name']] = {"Average Selling": round(mean1, 2), "Average Rental": round(
-            mean2, 2), "count": count}
+    for name in DISTRICTS:
+        sale = 0
+        rent = 0
+        condos_id = [i['_id'] for i in mongo.db['condo'].find({"district": name}, {"_id":1})]
+        listing = [ doc for doc in list(mongo.db['condo_listing'].find({}, {"sale":1, "rent": 1, "property": 1})) if doc['property'] in condos_id ]
+        for room_type in listing:
+            if "sale" in room_type.keys():
+                sale += len(room_type['sale'])
+            if "rent" in room_type.keys():
+                rent += len(room_type['rent'])
+        
+
+    # pipeline = [
+    #     {
+    #         "$project": {
+    #             "meanSale": { "$avg": "$sale.price" },
+    #             "meanRent": { "$avg": "$rent.price" },
+    #             "name": 1,
+    #             "location": 1,
+    #         }
+    #     },
+    #     {
+    #         "$group": {
+    #             "_id": "$location",
+    #             "sale": {"$avg": "$meanSale"},
+    #             "rent": {"$avg": "$meanRent"}
+    #         }
+    #     }
+    # ]
+    # query = list(mongo.db[ptype].aggregate(pipeline))
+    # for i in range(len(y['label'])):
+    #     d_list = []
+    #     for c in y['label'][i]['data']:
+    #         d_list.append(DISTRICTS_NAME.index(c['code']))
+    #     saleprice_list = []
+    #     rentprice_list = []
+    #     for j in query:
+    #         if DISTRICTS.index(j["_id"])in d_list:
+    #             if j["sale"] is not None:
+    #                 saleprice_list.append(j["sale"])
+    #             if j["rent"] is not None:
+    #                 rentprice_list.append(j["rent"])
+    #     saleprice_list = sorted(saleprice_list)
+    #     rentprice_list = sorted(rentprice_list)
+    #     saleprice_list = list(map(int, saleprice_list))
+    #     rentprice_list = list(map(int, rentprice_list))
+    #     # outliner = []
+    #     # q1, q3 = np.percentile(price_list, [25, 75])
+    #     # iqr = q3 - q1
+    #     # lower_bound = q1 - (1.5 * iqr)
+    #     # upper_bound = q3 + (1.5 * iqr)
+    #     # # for p in price_list:
+    #     # #     if p > lower_bound or p < upper_bound:
+    #     # #         outliner.append(p)
+    #     # outliner.append(q1)
+    #     # outliner.append(q3)
+    #     count = len(saleprice_list)
+    #     mean1 = statistics.mean(saleprice_list) if len(saleprice_list) > 0 else 0
+    #     mean2 = statistics.mean(rentprice_list) if len(rentprice_list) > 0 else 0
+    #     result[y['label'][i]['name']] = {"Average Selling": round(mean1, 2), "Average Rental": round(
+    #         mean2, 2), "count": count}
     resp = make_response(jsonify(result), 200)
     return resp
